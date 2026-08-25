@@ -76,13 +76,17 @@ Prime Agent has no `subagent(...)` tool. Subagents are native RLM children you s
 
 1. Read the role prompt (`subagents/researcher.md` in this skill's folder, or the maker roles under the `visualize` skill).
 2. Compose the one-shot task: the role prompt, then the concrete thing to research.
-3. Spawn: `handle = await rlm("<composed task>", name="researcher")`.
-4. Send a brief "researcher is verifying X — pausing." note to the learner as **plain assistant text with NO tool calls**, and **end your turn immediately after that text**. Do NOT call `ipython`, `print`, `await asyncio.sleep`, `sys.exit`, or any other tool to "wait" or "pause" — just stop generating. The child runs in the background; its `RESULT`/brief arrives as the next user-style agent message in this session. You do not poll for it. Any `ipython`/`print` after the spawn is a bug and will be treated as an infinite-loop failure.
-5. Asked a follow-up? `await agent_message.send("Follow-up question...", receiver_role="child", receiver_name=handle.name)`. Delete the child when done: `await rlm.delete_subagent(handle)`.
+3. Spawn with a **unique** name: `handle = await rlm("<composed task>", name="researcher-<kebab-topic>-<short-ts>")` — e.g. `researcher-http-17158` or `researcher-url-4291`. Never reuse `name="researcher"` verbatim; names must be unique among siblings or the second spawn will collide.
+4. Send a brief "researcher is verifying X — pausing." note to the learner as **plain assistant text with NO tool calls**, and **end your turn immediately after that text**. Do NOT call `ipython`, `print`, `await asyncio.sleep`, `sys.exit`, or any other tool to "wait" or "pause" — just stop generating. The child runs in the background; its `RESULT`/brief arrives as the next user-style agent message in this session. You do not poll for it in the same turn. Any `ipython`/`print` after the spawn in the same turn is a bug and will be treated as an infinite-loop failure.
+5. **Wait, then check at fixed intervals — retry up to 3 times, then timeout and continue.** The brief usually arrives within 30–60s. If nothing has arrived by your next turn:
+   - Check `await rlm.list_subagents()` — if the child is still `running`, wait another fixed interval (~30–45s) by yielding again (no busy loop). 
+   - If still `running` after the interval, you may delete and respawn once: `await rlm.delete_subagent(handle)` then `handle = await rlm(task, name="researcher-<kebab-topic>-<new-ts>")` and yield again. 
+   - Retry this at most 3 times total. If after 3 retries there is still no brief, or the child is `completed`/`error` with no usable brief, timeout: tell the learner the verification timed out, continue teaching from memory but flag what couldn't be verified, and delete the stalled child. Never wait forever.
+6. Asked a follow-up? `await agent_message.send("Follow-up question...", receiver_role="child", receiver_name=handle.name)`. Delete the child when done: `await rlm.delete_subagent(handle)`.
 
-Never block waiting for the child. Never invent its findings to avoid pausing — accuracy beats flow.
+Never invent its findings to avoid pausing — accuracy beats flow. Waiting forever is also a bug; after 3 retries, continue without the brief.
 
-> **Guardrail — strict pause contract (enforced):** After `await rlm(...)`, your very next output must be a single text-only assistant message (no tool_calls) and then you must yield. If you emit >2 `ipython` tool calls that are only `print(...)` without doing real work, the harness aborts the loop. Treat this as a hard rule, not a suggestion. Example correct sequence: `handle = await rlm(task, name="researcher")` → text: "Researcher is checking MDN/RFCs — pausing briefly for the brief." → stop. No `print("pause")`, no `time.sleep`.
+> **Guardrail — strict pause contract (enforced):** After `await rlm(...)`, your very next output must be a single text-only assistant message (no tool_calls) and then you must yield. If you emit >2 `ipython` tool calls that are only `print(...)` without doing real work, the harness aborts the loop. Treat this as a hard rule, not a suggestion. Example correct sequence: `handle = await rlm(task, name="researcher-http-17158")` → text: "Researcher is checking MDN/RFCs — pausing briefly for the brief." → stop (next turn, check `list_subagents` at ~35s intervals). No `print("pause")`, no `time.sleep`.
 
 ### Writing quiz options — a construction procedure (applies to every `quiz`)
 

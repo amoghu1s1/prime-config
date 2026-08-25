@@ -48,7 +48,9 @@ maker = await rlm(
 )
 ```
 
-Then end your turn with a one-line note ("making the diagram…"). Do NOT block waiting, and do NOT hand-author or fake a diagram yourself — correctness depends on the maker's render-and-inspect loop. (Need changes after the reply? Ask via `await agent_message.send(..., receiver_role="child", receiver_name=maker.name)` or just spawn a fresh maker; delete the child when done with `await rlm.delete_subagent(maker)`.)
+Then end your turn with a one-line note ("making the diagram…") as **plain assistant text with NO tool calls**, and **end your turn immediately**. Do NOT call `ipython`, `print`, `await asyncio.sleep`, or any other tool to wait — just stop generating. The maker replies later as an agent message. Do NOT hand-author or fake a diagram yourself — correctness depends on the maker's render-and-inspect loop. (Need changes after the reply? Ask via `await agent_message.send(..., receiver_role="child", receiver_name=maker.name)` or just spawn a fresh maker; delete the child when done with `await rlm.delete_subagent(maker)`.)
+
+> **Guardrail — strict pause contract (enforced) for makers too:** After `await rlm(..., name="mermaid-maker")` or `name="svg-maker"`, your very next output must be a single text-only message and then you must yield. No `ipython`/`print` loop. Use a **unique** name per spawn (`mermaid-maker-<kebab>-<ts>`, `svg-maker-<kebab>-<ts>`) so sibling names never collide. If the maker hasn't replied after ~45s, check `await rlm.list_subagents()` at fixed intervals; retry up to 3 times (delete + respawn) then timeout and continue without the visual. Waiting forever is a bug.
 
 The maker renders the PNG to `viz/` with a unique filename, **looks at it with `attach_image` and iterates until it is correct and clean**, then replies:
 
