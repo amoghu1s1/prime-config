@@ -1,0 +1,12 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+
+# prime runtime artifacts (not config)
+session-artifacts/
+sessions/
+*.log
