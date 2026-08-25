@@ -40,6 +40,14 @@ cp extensions/*.ts ~/.prime/agent/extensions/
 
 Optional: set your Obsidian vault for live logs (default is `C:\Users\Amogh\Desktop\Teaching` on Windows, `/mnt/c/Users/Amogh/Desktop/Teaching` under WSL).
 
+## Credits
+
+Original system by [Amos Blomqvist](https://github.com/amosblomqvist) — [amosblomqvist/learn](https://github.com/amosblomqvist/learn) ([How I Use AI to Learn](https://www.youtube.com/watch?v=kzcI5F4tGiU)).
+
+The teaching philosophy, skill text, and extension designs are his. This repo is a Prime Agent port — RLM subagent wiring (`rlm`/`agent_message`), the `httpx`/`bs4` researcher implementation, `mdlog_replay.py`, and other Prime-specific fixes are my improvements.
+
+Original repo is shared as-is with no explicit license. This port keeps his attribution intact and does not relicense his work.
+
 ## License
 
-MIT where applicable. Core teaching logic is from [amosblomqvist/learn](https://github.com/amosblomqvist/learn).
+No license file in the original repo, so original content remains © Amos Blomqvist. My Prime Agent-specific changes in this repo are MIT — see [LICENSE](#license-file) for details. If you reuse this port, keep the Credits above.
