@@ -1125,6 +1125,7 @@ export default function quiz(pi: ExtensionAPI) {
 			"Use the quiz tool to test the user with a graded multiple-choice or multi-select question (required correct answer + required explanation). For non-graded questions, use ask_user_question.",
 		promptGuidelines: [
 			"quiz is GRADED; ask_user_question is not. If the question has a correct answer, use quiz. If you just need a preference, decision, or open-ended input, use ask_user_question.",
+			"Before sending, run the teach skill's pre-flight linter on the full args — batch the whole round in one call (the script accepts a JSON array of quiz objects): python3 <teach skill dir>/scripts/lint_quiz.py /tmp/quiz-args.json — fix anything it flags before sending; a cancelled popup is NOT unavailability, only a plain_chat result is.",
 			'correctAnswer is REQUIRED and is the option value, not a position number. Single-select: one string (e.g. "mercury"). Multi-select: an array of strings (e.g. ["belize", "niue"]).',
 			"Always pass the option's `value` string as correctAnswer — it is self-checking and prevents miscounting positions. A value that matches no option is a hard error.",
 			"explanation is REQUIRED — always say why the correct answer is correct.",

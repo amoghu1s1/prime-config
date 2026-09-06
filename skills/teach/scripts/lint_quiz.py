@@ -16,6 +16,9 @@ The JSON is exactly the arguments you are about to send to `quiz`:
 
 Exit code 0 = clean, 1 = findings (fix before sending),
 2 = usage/parse/structure error (bad invocation or malformed JSON structure).
+
+The input may also be a JSON ARRAY of quiz-args objects — a whole drafted round
+linted in one call; findings are prefixed "quiz[i]:" per element.
 """
 import json
 import re
@@ -156,12 +159,33 @@ def main() -> None:
         q = json.loads(src)
     except json.JSONDecodeError as e:
         usage_error(f"input is not valid JSON: {e}")
-    if not isinstance(q, dict):
-        usage_error(f"quiz args must be a JSON object, got {type(q).__name__}.")
-    opts = q.get("options") or []
-    if not isinstance(opts, list):
-        usage_error(f"'options' must be a list, got {type(opts).__name__}.")
-    for i, o in enumerate(opts):
+    if not isinstance(q, (dict, list)):
+        usage_error(f"quiz args must be a JSON object (or array of objects), got {type(q).__name__}.")
+    if isinstance(q, list):
+        # Batch mode: a whole drafted round in one call. Every element must be
+        # a quiz-args object; any finding anywhere exits 1.
+        if not q:
+            usage_error("empty quiz array — nothing to lint.")
+        any_findings = False
+        for i, qi in enumerate(q):
+            if not isinstance(qi, dict):
+                usage_error(f"quiz[{i}] must be an object with label/value, got {type(qi).__name__}.")
+            for o in (qi.get("options") or []):
+                if not isinstance(o, dict):
+                    usage_error(f"quiz[{i}].options element must be an object, got {type(o).__name__}.")
+            qf = lint(qi)
+            if qf:
+                any_findings = True
+                print(f"lint_quiz: quiz[{i}] FIX BEFORE SENDING:")
+                for f in qf:
+                    print(f"  - {f}")
+        if any_findings:
+            sys.exit(1)
+        print(f"lint_quiz: CLEAN — all {len(q)} quizzes OK, send as-is.")
+        return
+    if not isinstance(q.get("options"), list):
+        usage_error(f"'options' must be a list, got {type(q.get('options')).__name__}.")
+    for i, o in enumerate(q["options"]):
         if not isinstance(o, dict):
             usage_error(f"options[{i}] must be an object with label/value, got {type(o).__name__}.")
     findings = lint(q)
