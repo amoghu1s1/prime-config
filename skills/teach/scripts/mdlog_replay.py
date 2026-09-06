@@ -16,6 +16,7 @@ Usage:
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 QA_TOOLS = {"quiz", "ask_user_question"}
@@ -23,6 +24,10 @@ QA_TOOLS = {"quiz", "ask_user_question"}
 
 def normalize_path(p: str) -> str:
     p = p.strip()
+    # Mirror md-log.ts normalizeLogPath (:383): on real Windows the paths are
+    # already native and are left untouched; only Linux/WSL gets C:\ -> /mnt/c.
+    if sys.platform == "win32":
+        return p
     if re.match(r"^[A-Za-z]:[\\/]", p):
         drive = p[0].lower()
         rest = p[2:].replace("\\", "/").lstrip("/")
@@ -106,7 +111,19 @@ def answer_callout(name: str, d: dict) -> str:
 
 
 def replay(session: Path) -> list[str]:
-    entries = [json.loads(l) for l in open(session, encoding="utf-8") if l.strip()]
+    # Tolerant reader: a truncated/corrupted jsonl line is skipped with a
+    # warning instead of aborting the whole replay — this script is the
+    # recovery path of last resort, so it must salvage what it can.
+    entries = []
+    with open(session, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                print(f"mdlog_replay: WARNING: skipping malformed line {n}: {e}", file=sys.stderr)
     results_by_id = {}
     for e in entries:
         if e.get("type") == "message" and e["message"].get("role") == "toolResult":
@@ -120,7 +137,8 @@ def replay(session: Path) -> list[str]:
         m = e["message"]
         role = m.get("role")
         if role == "user":
-            text = "".join(c.get("text", "") for c in m.get("content", []) if c.get("type") == "text")
+            # Join multi-part user text with "\n" like md-log.ts (:305).
+            text = "\n".join(c.get("text", "") for c in m.get("content", []) if c.get("type") == "text")
             trimmed = strip_skill_blocks(text.strip())
             if trimmed:
                 blocks.append(f"> [!quote] YOU\n\n{trimmed}")
@@ -137,12 +155,22 @@ def replay(session: Path) -> list[str]:
                     continue
                 args = c.get("arguments") or {}
                 details = (results_by_id.get(c.get("id")) or {}).get("details") or {}
+                if not isinstance(details, dict):
+                    details = {}
                 if name == "quiz":
-                    opts = details.get("options") or args.get("options") or []
-                    labels = [str(o.get("label")) for o in sorted(opts, key=lambda o: o.get("index", 0))]
+                    # Mirror md-log.ts: prefer the result's persisted post-shuffle
+                    # options; fall back to args.options only when it is a real
+                    # list (the harness sometimes delivers it as a JSON string,
+                    # which the extension also rejects via Array.isArray).
+                    shuffled = details.get("options")
+                    opts = shuffled if isinstance(shuffled, list) and shuffled else (
+                        args.get("options") if isinstance(args.get("options"), list) else [])
+                    labels = [str(o.get("label")) for o in sorted(opts, key=lambda o: o.get("index", 0) if isinstance(o, dict) else 0) if isinstance(o, dict)]
                     blocks.append(question_callout("Quiz", args.get("question", ""), args.get("details"), labels))
                 else:
-                    labels = [str(o.get("label")) for o in (args.get("options") or [])]
+                    opts = args.get("options")
+                    opts = opts if isinstance(opts, list) else []
+                    labels = [str(o.get("label")) for o in opts if isinstance(o, dict)]
                     blocks.append(question_callout("Question", args.get("question", ""), args.get("details"), labels))
         elif role == "toolResult":
             if m.get("toolName") not in QA_TOOLS:

@@ -39,12 +39,15 @@ Keep the idea intact but trust the maker to compose; if your brief lists more th
 
 ## Invoke (Prime Agent: spawn an RLM child, then pause)
 
-Prime Agent has no `subagent(...)` tool — makers are native RLM children. Read the maker's role prompt from this skill's `subagents/` folder, append your minimal brief, and spawn. The spawn **returns immediately**; the maker's reply arrives later as an agent message in this session:
+Prime Agent has no `subagent(...)` tool — makers are native RLM children. Read the maker's role prompt from this skill's `subagents/` folder, append your minimal brief, and spawn. The spawn **returns immediately**; the maker's reply arrives later as an agent message in this session.
+
+**Every brief MUST name one absolute save directory — you compute it, not the maker** (the lesson's vault `viz` path, or your cwd + `/viz` if the lesson note isn't in a vault). The maker cannot know your working directory, and an unbriefed save path means the embed silently fails.
 
 ```
+ts = int(time.time())
 maker = await rlm(
-    f"{role_prompt}\n\nBRIEF: <your minimal, concrete brief>",
-    name="mermaid-maker",   # or "svg-maker"
+    f"{role_prompt}\n\nBRIEF: <your minimal, concrete brief>\nSAVE TO: <absolute viz dir you computed>",
+    name=f"mermaid-maker-{topic_kebab}-{ts}",   # or f"svg-maker-{topic_kebab}-{ts}"
 )
 ```
 
@@ -52,28 +55,31 @@ Then end your turn with a one-line note ("making the diagram…") as **plain ass
 
 > **Guardrail — strict pause contract (enforced) for makers too:** After `await rlm(..., name="mermaid-maker")` or `name="svg-maker"`, your very next output must be a single text-only message and then you must yield. No `ipython`/`print` loop. Use a **unique** name per spawn (`mermaid-maker-<kebab>-<ts>`, `svg-maker-<kebab>-<ts>`) so sibling names never collide. If the maker hasn't replied after ~45s, check `await rlm.list_subagents()` at fixed intervals; retry up to 3 times (delete + respawn) then timeout and continue without the visual. Waiting forever is a bug.
 
-The maker renders the PNG to `viz/` with a unique filename, **looks at it with `attach_image` and iterates until it is correct and clean**, then replies:
+The maker renders the PNG into the exact directory the brief names, with a unique filename (`<timestamp>` = unix seconds), **looks at it with `attach_image` and iterates until it is correct and clean**, then replies:
 
 ```
 RESULT:
-filename: viz-<slug>-<timestamp>.png
-path: <cwd>/viz/viz-<slug>-<timestamp>.png
+filename: viz-<kebab-topic>-<unix-seconds>.png
+path: <the absolute save dir from the brief>/viz-<kebab-topic>-<unix-seconds>.png
 ```
 
-If it returns `RESULT: NONE`, it couldn't make a correct picture of the brief — simplify or rethink, or decide the visual isn't worth it. Never replace a returned file with an unverified one.
+If it returns the failure form — `RESULT:` on one line, then `NONE — <one-line reason>` — it couldn't make a correct picture of the brief; simplify or rethink, or decide the visual isn't worth it. Never replace a returned file with an unverified one.
 
 ## Embed it in the lesson
 
-Put the reference directly in your teaching reply using the returned **filename/path**. Prefer the markdown image link (renders in Kitty-capable terminals and in Obsidian when the `viz` folder is in the vault), plus the Obsidian wikilink embed for md-log reading:
+Put the reference directly in your teaching reply using the returned **filename/path**. The **Obsidian wikilink embed is canonical** — it resolves by filename anywhere in the vault:
 
 ```
-![](viz/viz-<slug>-<timestamp>.png)
-```
-```
-![[viz-<slug>-<timestamp>.png|500]]
+![[viz-<kebab-topic>-<unix-seconds>.png|500]]
 ```
 
-That's all. The `md-log` extension mirrors your reply text verbatim into the linked `.md`, and Obsidian resolves the embed by filename anywhere in the vault (the maker saves into the project's `viz` folder, which is inside the vault) — so it renders inline in the lesson automatically. Width `|500` is a good default; use larger for dense diagrams. Introduce the visual in a sentence, then let it carry the idea — don't narrate every element back in prose.
+The markdown image link is best-effort (it renders in Kitty-capable terminals). Compute it relative to the lesson note's directory — you know that path because you wrote the md-log config. E.g. `../viz/...` when the note is in `vault/learn/` and the image in `vault/viz/`:
+
+```
+![](../viz/viz-<kebab-topic>-<unix-seconds>.png)
+```
+
+That's all. The `md-log` extension mirrors your reply text verbatim into the linked `.md`, and the maker saved into the exact directory your brief named (inside the vault) — so it renders inline in the lesson automatically. Width `|500` is a good default; use larger for dense diagrams. Introduce the visual in a sentence, then let it carry the idea — don't narrate every element back in prose.
 
 ## Why this is reliable
 

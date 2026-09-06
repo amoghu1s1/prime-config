@@ -14,29 +14,66 @@ The JSON is exactly the arguments you are about to send to `quiz`:
   {"question": ..., "options": [{"label": ..., "value": ...}, ...],
    "correctAnswer": ..., "explanation": ..., "multiSelect": ...}
 
-Exit code 0 = clean, 1 = findings (fix before sending).
+Exit code 0 = clean, 1 = findings (fix before sending),
+2 = usage/parse/structure error (bad invocation or malformed JSON structure).
 """
 import json
 import re
 import sys
 
 # Justification words leak the answer when they appear inside option labels.
+# Temporal "since <digit>" (e.g. "rule in force since 2000") is a date, not a
+# justification, so it is accepted; only a reasoned "since <word>" is flagged.
 JUSTIFICATION = re.compile(
-    r"\b(because|since|therefore|thus|due to|so that|which (?:is why|means)|as it|"
-    r"given that|owing to|for this reason)\b", re.I)
+    r"\b(because|therefore|thus|due to|so that|which (?:is why|means)|as it|"
+    r"given that|owing to|for this reason)\b|\bsince\s+(?!\d)", re.I)
 # Hedging in ONE option makes it stand out; hedging in ALL is fine.
-HEDGES = re.compile(r"\b(usually|typically|generally|in most cases|may|might|often)\b", re.I)
+# "may/might/could" only count in verb-ish context ("may be", "might be",
+# "could be") so calendar months and dates ("May 1968") do not false-positive.
+HEDGES = re.compile(
+    r"\b(usually|typically|generally|in most cases|often|likely|possibly)\b|"
+    r"\b(?:may|might|could)\s+be\b", re.I)
+
+
+def coerce_correct_answer(correct) -> list[str]:
+    """Mirror quiz.ts coerceCorrectAnswer (:169-181): a JSON-stringified
+    multi-select array (e.g. '["a", "b"]') is parsed back into a list; a
+    plain value is wrapped as-is."""
+    if isinstance(correct, list):
+        return [str(c) for c in correct]
+    s = str(correct)
+    trimmed = s.strip()
+    if trimmed.startswith("[") and trimmed.endswith("]"):
+        try:
+            parsed = json.loads(trimmed)
+            if isinstance(parsed, list):
+                return [str(v) for v in parsed]
+        except json.JSONDecodeError:
+            pass  # not valid JSON — treat as a single literal value
+    return [s]
 
 
 def lint(q: dict) -> list[str]:
     findings = []
     opts = q.get("options") or []
-    labels = [str(o.get("label", "")) for o in opts]
+    # Trim like quiz.ts normalizeOptions (:136-137) so trims never diverge.
+    labels = [str(o.get("label", "")).strip() for o in opts]
+    values = [str(o.get("value") if o.get("value") is not None else o.get("label", "")).strip() for o in opts]
 
     if len(labels) < 2:
         findings.append("FEWER THAN 2 options — quiz needs at least two real options.")
+    empty_labels = [lab for lab in labels if lab == ""]
+    if empty_labels:
+        # quiz.ts normalizeOptions (:140-141) filters empty labels, leaving
+        # fewer than two real options and a runtime "at least two options" error.
+        findings.append("EMPTY option label — quiz.ts drops empty labels before grading, "
+                        "so the quiz will fail with 'at least two options'.")
     if len(set(labels)) != len(labels):
         findings.append("DUPLICATE option labels.")
+    # quiz.ts normalizeOptions (:142) hard-throws on duplicate values.
+    if len(set(values)) != len(values):
+        dups = sorted({v for v in values if values.count(v) > 1})
+        findings.append(f"DUPLICATE option values {dups!r} — quiz.ts hard-throws on these at runtime.")
     if not (q.get("question") or "").strip():
         findings.append("EMPTY question text.")
     exp = (q.get("explanation") or "").strip()
@@ -49,9 +86,10 @@ def lint(q: dict) -> list[str]:
     if correct in (None, "", []):
         findings.append("MISSING correctAnswer.")
     else:
-        values = [str(o.get("value") if o.get("value") is not None else o.get("label", "")) for o in opts]
-        wanted = correct if isinstance(correct, list) else [correct]
-        for w in wanted:
+        # Resolve like quiz.ts resolveCorrect (:193 trims, coerceCorrectAnswer
+        # parses stringified arrays) so trims and stringified arrays match.
+        for w in coerce_correct_answer(correct):
+            w = str(w).strip()
             if w not in values:
                 findings.append(f"correctAnswer {w!r} MATCHES NO option value — hard error at runtime.")
 
@@ -64,13 +102,20 @@ def lint(q: dict) -> list[str]:
     # makes that option longer, so length variance below usually catches it too.
 
     # Length evenness: one option far longer/shorter than the rest is a shape tell.
-    lens = [len(lab) for lab in labels if lab]
-    if len(lens) >= 3:
-        lo, hi = min(lens), max(lens)
-        if hi - lo > max(15, 0.6 * max(median := sorted(lens)[len(lens)//2], 1)):
-            longest = labels[lens.index(hi)]
+    # Track (len, original-index) pairs so the message names the right options;
+    # strip $...$ LaTeX before measuring (SKILL.md mandates LaTeX in options);
+    # skip empty labels — quiz.ts drops those and they are flagged separately.
+    pairs = [(len(re.sub(r"\$[^$]*\$", "", lab)), i) for i, lab in enumerate(labels) if lab]
+    if len(pairs) >= 3:
+        lo, hi = min(p[0] for p in pairs), max(p[0] for p in pairs)
+        lens_sorted = sorted(p[0] for p in pairs)
+        median = max(lens_sorted[len(pairs) // 2], 1)
+        if hi - lo > max(0.5 * median, 10):
+            longest = pairs[max(range(len(pairs)), key=lambda k: pairs[k][0])]
+            shortest = pairs[min(range(len(pairs)), key=lambda k: pairs[k][0])]
             findings.append(
-                f"LENGTH OUTLIER: options range {lo}-{hi} chars; longest is {longest!r} — "
+                f"LENGTH OUTLIER: options range {lo}-{hi} chars; longest is {labels[longest[1]]!r} "
+                f"({longest[0]} chars), shortest is {labels[shortest[1]]!r} ({shortest[0]} chars) — "
                 "regenerate the set from one skeleton (mutate the correct claim) instead of patching.")
 
     # Bolding asymmetry: bold in some options but not others flags the tested term.
@@ -86,19 +131,39 @@ def lint(q: dict) -> list[str]:
     return findings
 
 
+def usage_error(msg: str) -> None:
+    """Usage/parse/structure errors exit 2 so an orchestrator branching on the
+    exit code never mistakes them for lint findings (exit 1) or clean (0)."""
+    print(f"lint_quiz: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
 def main() -> None:
+    if len(sys.argv) > 2:
+        usage_error(f"too many arguments: {sys.argv[1:]}")
     raw = sys.argv[1] if len(sys.argv) > 1 else "-"
     if raw == "-":
         src = sys.stdin.read()
     elif re.match(r"^\s*\{", raw):
         src = raw
     else:
-        with open(raw, encoding="utf-8") as f:
-            src = f.read()
+        try:
+            with open(raw, encoding="utf-8") as f:
+                src = f.read()
+        except OSError as e:
+            usage_error(f"cannot read input: {e}")
     try:
         q = json.loads(src)
     except json.JSONDecodeError as e:
-        sys.exit(f"lint_quiz: input is not valid JSON: {e}")
+        usage_error(f"input is not valid JSON: {e}")
+    if not isinstance(q, dict):
+        usage_error(f"quiz args must be a JSON object, got {type(q).__name__}.")
+    opts = q.get("options") or []
+    if not isinstance(opts, list):
+        usage_error(f"'options' must be a list, got {type(opts).__name__}.")
+    for i, o in enumerate(opts):
+        if not isinstance(o, dict):
+            usage_error(f"options[{i}] must be an object with label/value, got {type(o).__name__}.")
     findings = lint(q)
     if not findings:
         print("lint_quiz: CLEAN — send as-is.")

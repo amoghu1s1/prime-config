@@ -256,12 +256,6 @@ function cancelledResult(question: string, mode: AskUserQuestionMode, context?: 
 	};
 }
 
-function unavailableResult(question: string, mode: AskUserQuestionMode, message: string, context?: string) {
-	return {
-		content: [{ type: "text" as const, text: message }],
-		details: buildStructuredResult("unavailable", question, mode, [], context, message),
-	};
-}
 function plainChatResult(question: string, mode: AskUserQuestionMode, options: AskOption[], context?: string) {
 	const message =
 		"Interactive question UI is not available in this session (the agent runs daemon/headless-hosted, where pop-up widgets cannot be drawn). " +
@@ -353,15 +347,6 @@ function buildResult(question: string, context: string | undefined, mode: AskUse
 		content: [{ type: "text" as const, text }],
 		details: buildStructuredResult("answered", question, mode, answers, context),
 	};
-}
-
-async function askSingleChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: AskOption[],
-): Promise<AskAnswer | null> {
-	return ctx.ui.custom<AskAnswer | null>(createSingleChoiceFactory(question, context, options));
 }
 
 function createSingleChoiceFactory(
@@ -494,15 +479,6 @@ function createSingleChoiceFactory(
 			handleInput,
 		};
 	};
-}
-
-async function askMultiChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: AskOption[],
-): Promise<AskAnswer[] | null> {
-	return ctx.ui.custom<AskAnswer[] | null>(createMultiChoiceFactory(question, context, options));
 }
 
 function createMultiChoiceFactory(

@@ -246,7 +246,8 @@ function buildStructuredResult(
 }
 
 function cancelledResult(question: string, mode: QuizMode, correctIndices: number[], context?: string) {
-	const message = "User cancelled the quiz";
+	const message =
+		"The USER cancelled this quiz popup — that is their choice, not a tool failure. The quiz tool IS still available: do NOT tell the learner the quiz UI is unavailable, and do not permanently switch to plain-text quizzing because of this. Re-ask the same question later, or continue without it. Only an explicit plain_chat (or unavailable) result means the quiz tool cannot deliver in this session.";
 	return {
 		content: [{ type: "text" as const, text: message }],
 		details: buildStructuredResult("cancelled", question, mode, [], correctIndices, undefined, undefined, context, message),
@@ -271,7 +272,8 @@ function plainChatResult(
 		"Interactive quiz UI is not available in this session (the agent runs daemon/headless-hosted, where pop-up widgets cannot be drawn). " +
 		"Ask the quiz question as a normal message, list the options, and wait for the user's typed reply. " +
 		"After they answer, grade it yourself against details.correctIndices and details.explanation, then reply with ✓/✗, the correct answer, and the explanation. " +
-		"Never reveal the correct answer before the user has answered; if they say they don't know, treat it as a knowledge gap, not a wrong guess.";
+		"Never reveal the correct answer before the user has answered; if they say they don't know, treat it as a knowledge gap, not a wrong guess. " +
+		"Explicitly invite the user to append an optional note to their answer — anything they were unsure about or want to qualify — and factor that note into your follow-up.";
 	return {
 		content: [{ type: "text" as const, text: message }],
 		details: buildStructuredResult(
@@ -299,6 +301,12 @@ function plainChatResult(
 // next fallback tier (native dialogs, then plain-chat) instead of cancelling.
 const UI_GRACE_MS = 600;
 
+// Set once any UI call has survived the grace window, i.e. a real dialog
+// round-trip happened in this process. Used by dialogOrNoop: after this flag
+// is set, the host-stub hypothesis is eliminated, so an instant valueless
+// settle can only be a very fast user cancel — and is treated as one.
+let realUiSeen = false;
+
 function raceSettle<T>(promise: Promise<T>, ms: number): Promise<{ pending: true } | { pending: false; value: T }> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	return Promise.race([
@@ -311,7 +319,10 @@ function raceSettle<T>(promise: Promise<T>, ms: number): Promise<{ pending: true
 	});
 }
 
-type HostUiOutcome<T> = { kind: "ui"; value: T | null } | { kind: "noop" };
+// "cancel" = an explicit user cancel (not a stub): the outcome must be
+// CANCELLED, never escalated to the next fallback tier. See customOrNoop and
+// dialogOrNoop for how the two are distinguished.
+type HostUiOutcome<T> = { kind: "ui"; value: T | null } | { kind: "noop" } | { kind: "cancel" };
 
 // Custom (full) UI: real in interactive mode, an instant-undefined stub in
 // daemon/RPC mode.
@@ -325,11 +336,19 @@ async function customOrNoop<T>(
 	const settled = await raceSettle(promise, UI_GRACE_MS);
 	if (settled.pending) {
 		// Real interactive UI is up and waiting for the user — its result is authoritative.
+		realUiSeen = true;
 		return { kind: "ui", value: await promise };
 	}
-	// Fast settle: the daemon/RPC stub (undefined) or a misbehaving host. Only a
-	// well-formed answer counts; anything else escalates to the next tier.
-	if (settled.value !== null && settled.value !== undefined && isAnswer(settled.value)) {
+	// Fast settle. The API DOES expose the distinction we need: an explicit
+	// user cancel settles with the payload `null` (the factory's done(null)),
+	// while the daemon/RPC custom stub settles with `undefined`. So an instant
+	// `null` is an explicit cancel — honour it as CANCELLED, never escalate to
+	// the next tier. An instant `undefined` is the stub; only a well-formed
+	// answer counts, anything else escalates.
+	if (settled.value === null) {
+		return { kind: "cancel" };
+	}
+	if (settled.value !== undefined && isAnswer(settled.value)) {
 		return { kind: "ui", value: settled.value };
 	}
 	return { kind: "noop" };
@@ -342,11 +361,22 @@ async function dialogOrNoop<T>(fn: () => Promise<T>): Promise<HostUiOutcome<T>> 
 	promise.catch(() => undefined);
 	const settled = await raceSettle(promise, UI_GRACE_MS);
 	if (settled.pending) {
+		// A real dialog is up and waiting — its result is authoritative.
+		realUiSeen = true;
 		return { kind: "ui", value: await promise };
 	}
+	// Fast valueless settle. Unlike the custom tier, the dialog API exposes no
+	// distinct cancel payload (a real cancel and a stub both resolve
+	// `undefined`), so fall back to context: once a real dialog has survived
+	// the grace window in this process, the stub hypothesis is eliminated and
+	// an instant valueless settle can only be a very fast user cancel — treat
+	// it as CANCELLED, never escalate. Before that, an instant settle is the
+	// host stub (or a host that cannot show dialogs), and escalating to the
+	// next tier is the correct reading.
 	if (settled.value === undefined || settled.value === null) {
-		return { kind: "noop" };
+		return realUiSeen ? { kind: "cancel" } : { kind: "noop" };
 	}
+	realUiSeen = true;
 	return { kind: "ui", value: settled.value };
 }
 
@@ -516,17 +546,6 @@ function makeNoteEditor(tui: any, theme: any): Editor {
 	editor.focused = false;
 	editor.disableSubmit = true;
 	return editor;
-}
-
-async function askSingleChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: QuizOption[],
-	correctIndices: number[],
-	explanation: string | undefined,
-): Promise<QuizResponse | null> {
-	return ctx.ui.custom<QuizResponse | null>(createSingleChoiceFactory(question, context, options, correctIndices, explanation));
 }
 
 function createSingleChoiceFactory(
@@ -704,17 +723,6 @@ function createSingleChoiceFactory(
 				handleInput,
 			};
 		};
-}
-
-async function askMultiChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: QuizOption[],
-	correctIndices: number[],
-	explanation: string | undefined,
-): Promise<QuizResponse | null> {
-	return ctx.ui.custom<QuizResponse | null>(createMultiChoiceFactory(question, context, options, correctIndices, explanation));
 }
 
 function createMultiChoiceFactory(
@@ -936,7 +944,7 @@ function createMultiChoiceFactory(
 				if (focus === "note") {
 					add(theme.fg("dim", " Type note • Ctrl+J newline • Enter back to options • Tab options • Esc back"));
 				} else {
-					add(theme.fg("dim", " ↑↓ navigate • Space toggle • Enter submit • Tab note • Esc cancel"));
+					add(theme.fg("dim", " ↑↓ navigate • Space toggle • Enter toggle/submit • Tab note • Esc cancel"));
 				}
 				add(theme.fg("accent", "─".repeat(width)));
 				// Not cached when the note is focused: the editor renders a live cursor.
@@ -962,6 +970,29 @@ function sortAnswers(answers: OptionAnswer[]): OptionAnswer[] {
 	return [...answers].sort((a, b) => a.index - b.index);
 }
 
+// Reserved labels the dialog tier appends to every picker ("I don't know", and
+// "Done" in multi-select). If a real option's label collides, rename its
+// DISPLAY label (mirroring ask-user-question.ts's getOtherLabel pattern) so the
+// real option stays selectable instead of silently mapping to the reserved
+// outcome. Comparison is case-insensitive, like getOtherLabel.
+function getReservedSafeLabel(label: string, reserved: string[]): string {
+	const lower = label.toLowerCase();
+	return reserved.some((r) => r.toLowerCase() === lower) ? `${label} (skip)` : label;
+}
+
+// A9: the note field exists in EVERY tier. The dialog tier has no inline note
+// editor, so after the user answers, offer a skippable note input: an empty
+// submit, an editor cancel, or a host that cannot show the editor all mean
+// "no note" — the answer itself is kept either way.
+async function dialogNotePrompt(ctx: any, question: string): Promise<string | undefined> {
+	const typed = await dialogOrNoop<string | undefined>(() =>
+		ctx.ui.editor(`Optional note — anything you were unsure about (leave empty and press Enter to skip)\n\n${question}`),
+	);
+	if (typed.kind !== "ui") return undefined;
+	const trimmed = (typed.value ?? "").trim();
+	return trimmed.length ? trimmed : undefined;
+}
+
 async function askSingleChoiceAdaptive(
 	ctx: any,
 	question: string,
@@ -971,20 +1002,27 @@ async function askSingleChoiceAdaptive(
 	explanation: string | undefined,
 ): Promise<AdaptiveResult<QuizResponse>> {
 	const viaCustom = await customOrNoop<QuizResponse | null>(ctx, createSingleChoiceFactory(question, context, options, correctIndices, explanation), (v) => typeof v === "object" && v !== null && typeof (v as { dontKnow?: unknown }).dontKnow === "boolean" && Array.isArray((v as { answers?: unknown }).answers))
+	if (viaCustom.kind === "cancel") return { kind: "answer", value: null };
 	if (viaCustom.kind === "ui") return { kind: "answer", value: viaCustom.value };
 
 	// Dialog tier: native selector (+ fire-and-forget feedback toast).
 	const title = context ? `${question}\n\n${context}` : question;
-	const labels = [...options.map((o) => o.label), DONT_KNOW_LABEL];
+	// Reserved-label collision (A8): a real option labelled "I don't know" gets
+	// a renamed display label so it stays selectable in this tier.
+	const displayLabels = options.map((o) => getReservedSafeLabel(o.label, [DONT_KNOW_LABEL]));
+	const labels = [...displayLabels, DONT_KNOW_LABEL];
 	const picked = await dialogOrNoop<string | undefined>(() => ctx.ui.select(title, labels));
+	if (picked.kind === "cancel") return { kind: "answer", value: null };
 	if (picked.kind === "noop") return { kind: "chat" };
 	if (picked.value === undefined) return { kind: "answer", value: null };
 	const correctStr = correctIndices.map((i) => formatOptionRef(options, i)).join(", ");
 	if (picked.value === DONT_KNOW_LABEL) {
 		ctx.ui.notify(`I don't know. The correct answer is: ${correctStr}`, "info");
-		return { kind: "answer", value: { dontKnow: true, answers: [] } };
+		const note = await dialogNotePrompt(ctx, question);
+		return { kind: "answer", value: { dontKnow: true, answers: [], note } };
 	}
-	const matched = options.find((o) => o.label === picked.value);
+	const matchedIndex = displayLabels.indexOf(picked.value);
+	const matched = matchedIndex >= 0 ? options[matchedIndex] : undefined;
 	if (!matched) return { kind: "answer", value: null };
 	const index = options.indexOf(matched) + 1;
 	const correct = correctIndices.includes(index);
@@ -992,9 +1030,10 @@ async function askSingleChoiceAdaptive(
 		? `✓ Correct! ${explanation ?? ""}`.trim()
 		: `✗ Incorrect. Correct: ${correctStr}. ${explanation ?? ""}`.trim();
 	ctx.ui.notify(feedback, correct ? "success" : "error");
+	const note = await dialogNotePrompt(ctx, question);
 	return {
 		kind: "answer",
-		value: { dontKnow: false, answers: [{ label: matched.label, value: matched.value, index }] },
+		value: { dontKnow: false, answers: [{ label: matched.label, value: matched.value, index }], note },
 	};
 }
 
@@ -1007,29 +1046,36 @@ async function askMultiChoiceAdaptive(
 	explanation: string | undefined,
 ): Promise<AdaptiveResult<QuizResponse>> {
 	const viaCustom = await customOrNoop<QuizResponse | null>(ctx, createMultiChoiceFactory(question, context, options, correctIndices, explanation), (v) => typeof v === "object" && v !== null && typeof (v as { dontKnow?: unknown }).dontKnow === "boolean" && Array.isArray((v as { answers?: unknown }).answers))
+	if (viaCustom.kind === "cancel") return { kind: "answer", value: null };
 	if (viaCustom.kind === "ui") return { kind: "answer", value: viaCustom.value };
 
 	// Dialog tier: repeated native selectors; picks accumulate until Done.
 	const title = context ? `${question}\n\n${context}` : question;
 	const DONE = "Done";
+	// Reserved-label collision (A8): real options labelled "I don't know" or
+	// "Done" get renamed display labels so they stay selectable in this tier.
+	const reserved = [DONT_KNOW_LABEL, DONE];
+	const displayLabels = new Map(options.map((o) => [o.value, getReservedSafeLabel(o.label, reserved)]));
 	const answers: OptionAnswer[] = [];
-	const pickedLabels = new Set<string>();
+	const pickedValues = new Set<string>();
 	while (true) {
-		const remaining = options.filter((o) => !pickedLabels.has(o.label));
-		const labels = [...remaining.map((o) => o.label), DONT_KNOW_LABEL, DONE];
+		const remaining = options.filter((o) => !pickedValues.has(o.value));
+		const labels = [...remaining.map((o) => displayLabels.get(o.value) ?? o.label), DONT_KNOW_LABEL, DONE];
 		const picked = await dialogOrNoop<string | undefined>(() =>
 			ctx.ui.select(`${title} (${answers.length} selected so far — pick more, I don't know, or Done)`, labels),
 		);
+		if (picked.kind === "cancel") return { kind: "answer", value: null };
 		if (picked.kind === "noop") return { kind: "chat" };
 		if (picked.value === undefined) return { kind: "answer", value: null };
 		if (picked.value === DONE) break;
 		if (picked.value === DONT_KNOW_LABEL) {
 			ctx.ui.notify(`I don't know. The correct answer is: ${correctIndices.map((i) => formatOptionRef(options, i)).join(", ")}`, "info");
-			return { kind: "answer", value: { dontKnow: true, answers: [] } };
+			const note = await dialogNotePrompt(ctx, question);
+			return { kind: "answer", value: { dontKnow: true, answers: [], note } };
 		}
-		const matched = options.find((o) => o.label === picked.value);
+		const matched = options.find((o) => !pickedValues.has(o.value) && displayLabels.get(o.value) === picked.value);
 		if (!matched) continue;
-		pickedLabels.add(matched.label);
+		pickedValues.add(matched.value);
 		answers.push({ label: matched.label, value: matched.value, index: options.indexOf(matched) + 1 });
 	}
 	const correct = isCorrect(answers.map((a) => a.index), correctIndices);
@@ -1038,7 +1084,8 @@ async function askMultiChoiceAdaptive(
 		? `✓ Correct! ${explanation ?? ""}`.trim()
 		: `✗ Incorrect. Correct: ${correctStr}. ${explanation ?? ""}`.trim();
 	ctx.ui.notify(feedback, correct ? "success" : "error");
-	return { kind: "answer", value: { dontKnow: false, answers } };
+	const note = await dialogNotePrompt(ctx, question);
+	return { kind: "answer", value: { dontKnow: false, answers, note } };
 }
 
 // Shared UI mutex. ctx.ui.custom()/editor can only handle one active call at
@@ -1073,7 +1120,7 @@ export default function quiz(pi: ExtensionAPI) {
 		name: "quiz",
 		label: "quiz",
 		description:
-			"Ask the user a GRADED question with a known correct answer, then instantly grade and give feedback. Unlike ask_user_question (which collects preferences/decisions with no right answer), quiz always has a correct answer supplied by you, marks the user's selection right/wrong (✓/✗), reveals the correct answer, and can show an explanation. Use it to (1) assess what the learner already understands before teaching, and (2) run tight practice/retrieval loops after explaining, or probe understanding whenever you're unsure they've got it. Options-only: single-select or multi-select, plus an automatic 'I don't know' choice so the user can signal a genuine gap instead of guessing. An always-present optional note field (Tab to focus it) lets the user attach a free-text note to ANY answer; it reaches you only when non-empty. No free-text answers — for non-graded questions use ask_user_question instead.",
+			"Ask the user a GRADED question with a known correct answer, then instantly grade and give feedback. Unlike ask_user_question (which collects preferences/decisions with no right answer), quiz always has a correct answer supplied by you, marks the user's selection right/wrong (✓/✗), reveals the correct answer, and can show an explanation. Use it to (1) assess what the learner already understands before teaching, and (2) run tight practice/retrieval loops after explaining, or probe understanding whenever you're unsure they've got it. Options-only: single-select or multi-select, plus an automatic 'I don't know' choice so the user can signal a genuine gap instead of guessing. An optional free-text note is available in EVERY tier — Tab to focus it in the interactive UI, a skippable prompt after answering in the dialog tier, or appended to the typed answer in the plain-chat fallback — and lets the user attach context to ANY answer; it reaches you only when non-empty. No free-text answers — for non-graded questions use ask_user_question instead.",
 		promptSnippet:
 			"Use the quiz tool to test the user with a graded multiple-choice or multi-select question (required correct answer + required explanation). For non-graded questions, use ask_user_question.",
 		promptGuidelines: [
@@ -1084,7 +1131,8 @@ export default function quiz(pi: ExtensionAPI) {
 			"Multi-select is graded as an exact-set match: the user is correct only if they select every correct option and no incorrect ones.",
 			"There is no free-text mode. An 'I don't know' choice is ALWAYS added automatically — provide ONLY the real, gradable options (at least two). Never add your own uncertainty/opt-out option like 'I don't know', 'I'm not sure', or 'Not sure'; that is handled for you and a manual one would be redundant or gradable-as-wrong.",
 			"If a result comes back as dontKnow, the user honestly did not know and did NOT guess — treat it as a genuine knowledge gap to teach into, not as a wrong answer.",
-			"Any answer (right, wrong, or 'I don't know') may carry an optional free-text `note` the user typed in the always-present note field. When present it reflects what they were thinking or unsure about — read it and let it steer your follow-up. It is omitted entirely when empty.",
+			"Any answer (right, wrong, or 'I don't know') may carry an optional free-text `note` the user attached — the note field exists in every tier (inline in the interactive UI, a skippable prompt after answering in the dialog tier, appended in chat in the plain-chat fallback). When present it reflects what they were thinking or unsure about — read it and let it steer your follow-up. It is omitted entirely when empty.",
+			"A result of status 'cancelled' means the USER closed the quiz popup — the quiz tool itself is still available. Do not claim the quiz UI is unavailable, and do not permanently switch to plain-text questions because of a cancel; re-ask the same question later or continue. Only a 'plain_chat' (or 'unavailable') result means the tool cannot deliver in this session.",
 			"Option construction style is defined canonically in the teach skill's 'Writing quiz options' section — follow it whenever that skill is loaded: every option is a bare claim (no justification in labels), each distractor is a targeted misconception that is unambiguously wrong on the intended reading (diagnostic, not filler, never a trick), and all options are built by mutating the correct claim so they stay parallel in length, specificity, and formatting — the correct one must not be spottable by shape (longest, most precise, most hedged, or the only one in the right format).",
 			"Set multiSelect: true only when more than one option is correct.",
 			"Options are shuffled before display by default, so don't worry about which position you list the correct answer in. Set shuffle: false only when option order is meaningful (ordered values, or an 'All/None of the above' option that must stay last).",
@@ -1171,10 +1219,21 @@ export default function quiz(pi: ExtensionAPI) {
 			// order shown during streaming would be stale/misleading. The full option
 			// list is rendered — in its true display order — by renderResult after the
 			// user answers.
-			const options = normalizeOptions(
-				args.options as Array<{ label: string; value?: string; description?: string }> | undefined,
-			);
+			// args stream in while the tool call is being formed; an invalid option
+			// set (e.g. a duplicate value) must degrade to a rendered note, not
+			// throw — execute() reports the same problem as a graceful
+			// `unavailable` tool result.
+			let options: QuizOption[];
 			let text = theme.fg("toolTitle", theme.bold("quiz ")) + theme.fg("muted", args.question);
+			try {
+				options = normalizeOptions(
+					args.options as Array<{ label: string; value?: string; description?: string }> | undefined,
+				);
+			} catch (e) {
+				const reason = (e as Error)?.message ?? "unknown error";
+				text += theme.fg("warning", ` (invalid options: ${reason})`);
+				return new Text(text, 0, 0);
+			}
 			if (args.multiSelect) {
 				text += theme.fg("dim", " [multi-select]");
 			}

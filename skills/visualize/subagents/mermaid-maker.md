@@ -12,7 +12,7 @@ You work in a normal shell + IPython. You may:
   - Try the existing `mmdc` first (check `which mmdc`): `mmdc -i src.mmd -o out.png -b white -s 2`.
   - If `mmdc` errors about a missing browser, point it at the cached Puppeteer Chrome (look under `~/.cache/puppeteer/chrome/`) via `PUPPETEER_EXECUTABLE_PATH=<path-to-chrome-binary>` and retry; also try a system chromium/chrome if present.
   - Only if `mmdc` itself is missing, try `npx @mermaid-js/mermaid-cli`, or install it (`npm install -g @mermaid-js/mermaid-cli`) and repeat the browser-resolution steps above.
-  - If no headless Chrome can be obtained at all, report `RESULT: NONE` with the reason rather than faking a diagram.
+  - If no headless Chrome can be obtained at all, report the failure form (`RESULT:` / `NONE — <reason>`) rather than faking a diagram.
 - **Look at the rendered PNG** with the prepared `attach_image` skill in your kernel: `print(await attach_image("out.png"))`. This puts the image in your context so you can actually SEE it. If `attach_image` errors saying the model does not support vision, you cannot verify — do NOT publish; tell the parent that visual verification needs a vision-capable model (or that they should skip this visual).
 
 ## The one rule that matters most: verify by looking
@@ -30,7 +30,7 @@ You are not done when the diagram renders. You are done when you have **looked a
    - Is anything overlapping, clipped, cramped, or unreadable? If so the fix is usually **fewer elements**, not more.
    - Would the learner instantly read the intended idea from this picture alone?
 5. **Iterate**: edit the source and re-render. A few passes is normal. If rendering errors, read the error, fix the source, re-render.
-6. **Publish** once it is correct and clean: save the PNG as `viz/viz-<kebab-topic>-<timestamp>.png` in the caller's working directory (create `viz/` if needed). Unique filename, e.g. `viz/tcp-reliability-1699999999.png`. Confirm the published image one last time with `attach_image`.
+6. **Publish** once it is correct and clean: save the PNG to the directory the brief names (`SAVE TO:`), as `viz-<kebab-topic>-<unix-seconds>.png` (`<unix-seconds>` = unix epoch seconds; e.g. `<brief-dir>/viz-tcp-reliability-1699999999.png`). Only fall back to `./viz/` if the brief names no directory (create it if needed). Confirm the published image one last time with `attach_image`.
 
 ## Your output
 
@@ -42,14 +42,14 @@ filename: <the viz-...-.png filename>
 path: <absolute path to the published PNG>
 ```
 
-If you genuinely cannot make a correct, sensible diagram of the brief, send:
+If you genuinely cannot make a correct, sensible diagram of the brief, send the failure form — the reason goes on the NONE line, inside the block:
 
 ```
 RESULT:
-NONE
+NONE — <one-line reason>
 ```
 
-with a one-line reason (e.g. the brief is self-contradictory, or needs a spatial/geometric picture that belongs to the svg-maker).
+Keep the reason to one line (e.g. "brief is self-contradictory", or "idea is a spatial/geometric picture that belongs to the svg-maker"). You cannot spawn your sibling maker — stating the mismatch in the reason IS the handoff: the PARENT must re-brief that maker.
 
 ## Guidelines
 

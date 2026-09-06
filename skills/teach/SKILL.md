@@ -101,11 +101,15 @@ The tool already tells you to keep options even. That rule isn't enough on its o
 
 If, reading the finished set cold, you can still tell which is right without knowing the material, you skipped step 1 or 2 — regenerate, don't patch.
 
-**Pre-flight linter (run it on every quiz).** The mechanical tells are checkable by script, so let the script check them: justification words inside option labels, one option far longer/shorter than the rest, bolding that appears in some options but not others, a missing or empty explanation. Pass the drafted quiz arguments as JSON to:
+**Pre-flight linter (run it on every quiz).** The mechanical tells are checkable by script, so let the script check them: justification words inside option labels, one option far longer/shorter than the rest, bolding that appears in some options but not others, a missing or empty explanation. Give each option a stable `value`, and pass `correctAnswer` as that VALUE — never a position or the label itself. Pass the FULL args object you're about to send to `quiz`, including the `value` fields and `multiSelect` if you use them:
 
-`python3 <teach skill dir>/scripts/lint_quiz.py '<quiz-args-json>'`
+`{"question": ..., "options": [{"label": ..., "value": ...}, ...], "correctAnswer": "<one option's value>", "explanation": ..., "multiSelect": false}`
 
-where `<quiz-args-json>` is exactly the arguments you're about to send to `quiz` — `{"question": ..., "options": [{"label": ...}, ...], "correctAnswer": ..., "explanation": ...}`. Fix anything it flags before sending; if it reports clean, send as-is.
+Use the robust invocation: build the args object in your kernel, `json.dumps` it to a temp file, and run the script on that file (it also accepts the JSON on stdin):
+
+`python3 <teach skill dir>/scripts/lint_quiz.py /tmp/quiz-args.json`
+
+Fix anything it flags before sending; if it reports clean, send as-is.
 
 ### Phase 1 — Probe (never skip this)
 

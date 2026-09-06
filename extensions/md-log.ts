@@ -52,17 +52,28 @@ export default function mdLog(pi: ExtensionAPI) {
 			}
 		}
 		if (lastLinkData?.file) {
-			logFile = lastLinkData.file;
-			const theme = ctx.ui.theme;
-			ctx.ui.setStatus(
-				"md-log",
-				theme.fg("accent", "🗒 ") + theme.fg("dim", path.basename(logFile)),
-			);
-			return;
+			if (fs.existsSync(lastLinkData.file)) {
+				logFile = lastLinkData.file;
+				const theme = ctx.ui.theme;
+				ctx.ui.setStatus(
+					"md-log",
+					theme.fg("accent", "🗒 ") + theme.fg("dim", path.basename(logFile)),
+				);
+				return;
+			}
+			// The linked note vanished since the last session (renamed, moved,
+			// or deleted). Notify instead of silently no-oping the whole
+			// session, then fall through to the config auto-link path.
+			try {
+				ctx.ui.notify(
+					`md-log: previously linked note is missing: ${lastLinkData.file} — falling back to config auto-link`,
+					"warning",
+				);
+			} catch {
+				// ignore UI failures
+			}
 		}
-		if (!lastLinkData?.file) {
-			cfgFingerprint = readConfigFingerprint();
-		}
+		cfgFingerprint = readConfigFingerprint();
 	});
 
 	// --- Per-lesson auto-link: react to the agent writing md-log-config.json ---
@@ -147,17 +158,64 @@ export default function mdLog(pi: ExtensionAPI) {
 		return prev.then(fn).finally(() => release!());
 	}
 
-	function appendToFile(text: string): void {
+	// Appends are serialized by withLock, so a synchronous append preserves
+	// ordering without reading the file back — O(1) per append instead of the
+	// old O(file) read-modify-write. Failure policy: notify the user on the
+	// first failed append of a streak (re-surface every 10th failure while the
+	// streak persists, reset on the next success) and keep going — blocks are
+	// never dropped without notice. If the linked note vanishes mid-session
+	// (deleted or recreated externally), it is re-created with a warning
+	// header so the history loss is visible in the note itself.
+	let writeFailStreak = 0;
+	let goneNotified = false;
+
+	const NOTE_WARNING_HEADER = [
+		"> [!warning] md-log: this note was deleted or recreated externally mid-session.",
+		"> Earlier history was lost; new entries continue below.",
+	].join("\n") + "\n\n";
+
+	function appendToFile(text: string, ctx?: any): void {
 		if (!logFile) return;
 		try {
-			let current = "";
-			if (fs.existsSync(logFile)) {
-				current = fs.readFileSync(logFile, "utf-8");
+			let size: number | null = null;
+			try {
+				size = fs.statSync(logFile).size;
+			} catch {
+				size = null;
 			}
-			const prefix = current.trim().length > 0 ? "\n\n" : "";
-			fs.writeFileSync(logFile, current + prefix + text + "\n", "utf-8");
+			if (size === null) {
+				fs.writeFileSync(logFile, NOTE_WARNING_HEADER, "utf-8");
+				if (!goneNotified) {
+					goneNotified = true;
+					notifyUi(
+						ctx,
+						`md-log: linked note vanished — re-created with a warning header: ${logFile}`,
+						"warning",
+					);
+				}
+				size = 0;
+			} else {
+				goneNotified = false;
+			}
+			const prefix = size > 0 ? "\n\n" : "";
+			fs.appendFileSync(logFile, prefix + text + "\n", "utf-8");
+			if (writeFailStreak > 0) writeFailStreak = 0; // recovered
+		} catch (err) {
+			writeFailStreak++;
+			const message = writeFailStreak === 1
+				? `md-log: append failed (${String(err)}) — continuing; new blocks are being dropped`
+				: `md-log: append still failing — ${writeFailStreak} blocks dropped so far`;
+			if (writeFailStreak === 1 || writeFailStreak % 10 === 0) {
+				notifyUi(ctx, message, "error");
+			}
+		}
+	}
+
+	function notifyUi(ctx: any, message: string, level: "info" | "warning" | "error" | "success"): void {
+		try {
+			ctx?.ui?.notify?.(message, level);
 		} catch {
-			// File may have been deleted externally; ignore.
+			// ignore UI failures
 		}
 	}
 
@@ -306,7 +364,7 @@ export default function mdLog(pi: ExtensionAPI) {
 					: "";
 			const trimmed = stripSkillBlocks(text.trim());
 			if (!trimmed) return;
-			await withLock(() => appendToFile(userBlock(trimmed)));
+			await withLock(() => appendToFile(userBlock(trimmed), ctx));
 			return;
 		}
 
@@ -316,7 +374,7 @@ export default function mdLog(pi: ExtensionAPI) {
 				.map((c: any) => (c.text as string).trim())
 				.filter((t: string) => t.length > 0);
 			if (textParts.length === 0) return;
-			await withLock(() => appendToFile(assistantBlock(textParts.join("\n\n"))));
+			await withLock(() => appendToFile(assistantBlock(textParts.join("\n\n")), ctx));
 			return;
 		}
 		// toolResult messages are handled by the tool_result event (for QA tools).
@@ -325,7 +383,7 @@ export default function mdLog(pi: ExtensionAPI) {
 	// ask_user_question never shuffles its options, so the tool_call args are
 	// already the true display order — safe to write the question live, before
 	// the user answers.
-	pi.on("tool_call", async (event, _ctx) => {
+	pi.on("tool_call", async (event, ctx) => {
 		if (!logFile) return;
 		const toolName = (event as any).toolName;
 		if (toolName !== "ask_user_question") return;
@@ -334,7 +392,7 @@ export default function mdLog(pi: ExtensionAPI) {
 		const context: string | undefined = input.details?.trim() || undefined;
 		const options: Array<{ label: string }> = Array.isArray(input.options) ? input.options : [];
 		const block = questionCallout("Question", question, context, options);
-		await withLock(() => appendToFile(block));
+		await withLock(() => appendToFile(block, ctx));
 	});
 
 	// quiz DOES shuffle its options inside execute(), so the tool_call args are
@@ -344,7 +402,7 @@ export default function mdLog(pi: ExtensionAPI) {
 	// what's on screen. Guard against duplicate writes if multiple updates fire
 	// for the same call.
 	const loggedQuizQuestion = new Set<string>();
-	pi.on("tool_execution_update", async (event, _ctx) => {
+	pi.on("tool_execution_update", async (event, ctx) => {
 		if (!logFile) return;
 		const toolName = (event as any).toolName;
 		if (toolName !== "quiz") return;
@@ -358,10 +416,10 @@ export default function mdLog(pi: ExtensionAPI) {
 		const context: string | undefined = input.details?.trim() || undefined;
 		const options = shuffled.map((o) => ({ label: o.label }));
 		const block = questionCallout("Quiz", question, context, options);
-		await withLock(() => appendToFile(block));
+		await withLock(() => appendToFile(block, ctx));
 	});
 
-	pi.on("tool_result", async (event, _ctx) => {
+	pi.on("tool_result", async (event, ctx) => {
 		if (!logFile) return;
 		const toolName = (event as any).toolName;
 		if (!QA_TOOLS.has(toolName)) return;
@@ -369,7 +427,7 @@ export default function mdLog(pi: ExtensionAPI) {
 		const block = toolName === "quiz"
 			? answerCalloutQuiz(details)
 			: answerCalloutAsk(details);
-		await withLock(() => appendToFile(block));
+		await withLock(() => appendToFile(block, ctx));
 	});
 
 	// --- Commands ---
