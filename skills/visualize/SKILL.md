@@ -83,4 +83,4 @@ That's all. The `md-log` extension mirrors your reply text verbatim into the lin
 
 > The makers render in their own shells (Mermaid via `@mermaid-js/mermaid-cli` + Chrome; SVG via `rsvg-convert` — see the role prompts). You don't render anything yourself — you only brief the maker and embed the filename it returns.
 >
-> **Vision-gated.** Verify-by-looking needs a vision-capable model (the maker uses `attach_image`, which errors on non-vision models). If the current session's model can't see images, the maker will report that it cannot verify and return `RESULT: NONE` — then skip or postpone the visual rather than accepting an unverified picture. (This session's default model `deepseek-v4-flash` is not vision-capable.)
+> **Vision-gated.** Verify-by-looking needs a vision-capable model — and the session's model changes, so never assume either way. The maker uses `attach_image`, which errors clearly when the current model can't see images. If the maker reports it cannot verify (non-vision model) or returns `RESULT: NONE`, skip or postpone the visual rather than accepting an unverified picture.

@@ -8,11 +8,11 @@ You do NOT decide *what* idea to show — the caller (a teacher) already decided
 
 You work in a normal shell + IPython. You may:
 - Write your Mermaid source to a temp `.mmd` file (Python or the `edit`/file tools).
-- Render to PNG with the Mermaid CLI (needs Chrome):
-  - `mmdc -i src.mmd -o out.png -b white -s 2` (if a local `mmdc` exists, e.g. `npx @mermaid-js/mermaid-cli`)
-  - If `mmdc` is missing, install it: `npm install -g @mermaid-js/mermaid-cli`, then ensure Chrome is available (set `PUPPETEER_EXECUTABLE_PATH` if installed, or `npx puppeteer browsers install chrome`).
-  - If you cannot get a headless Chrome, fall back to `npx @mermaid-js/mermaid-cli` with a system chromium/chrome; if that fails, report `RESULT:
-NONE` with the reason rather than faking a diagram.
+- Render to PNG with the Mermaid CLI (needs a headless Chrome):
+  - Try the existing `mmdc` first (check `which mmdc`): `mmdc -i src.mmd -o out.png -b white -s 2`.
+  - If `mmdc` errors about a missing browser, point it at the cached Puppeteer Chrome (look under `~/.cache/puppeteer/chrome/`) via `PUPPETEER_EXECUTABLE_PATH=<path-to-chrome-binary>` and retry; also try a system chromium/chrome if present.
+  - Only if `mmdc` itself is missing, try `npx @mermaid-js/mermaid-cli`, or install it (`npm install -g @mermaid-js/mermaid-cli`) and repeat the browser-resolution steps above.
+  - If no headless Chrome can be obtained at all, report `RESULT: NONE` with the reason rather than faking a diagram.
 - **Look at the rendered PNG** with the prepared `attach_image` skill in your kernel: `print(await attach_image("out.png"))`. This puts the image in your context so you can actually SEE it. If `attach_image` errors saying the model does not support vision, you cannot verify — do NOT publish; tell the parent that visual verification needs a vision-capable model (or that they should skip this visual).
 
 ## The one rule that matters most: verify by looking

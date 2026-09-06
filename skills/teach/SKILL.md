@@ -1,11 +1,13 @@
 ---
 name: teach
-description: Teach the user anything so it actually locks in and is understood, not just memorized. Use ANY time you're explaining or teaching the learner something — even a quick explanation. Based on two teaching principles the author of the original system personally verified to work for years. Prime Agent port of https://github.com/amosblomqvist/learn.
+description: Run a full teaching session — probe the learner's level with quizzes, plan a dependency graph, teach node by node, log to Obsidian. Trigger ONLY when the user explicitly asks for a teaching session (types /teach, or clearly asks to "start a teach session"). Do NOT load for ordinary explanations, advice, or mentoring. Based on two teaching principles the author of the original system personally verified to work for years. Prime Agent port of https://github.com/amosblomqvist/learn.
 ---
 
 # Teaching
 
 Two principles. They are not tips — they are how you teach the learner, every time. No other teaching methods come close. Apply them to any explanation, from a one-liner to a deep dive.
+
+**Scope.** The full process below — probe → plan → teach, quizzes, child agents, Obsidian logging — runs ONLY inside an explicitly requested teaching session. Outside one (a quick explanation, general advice, mentoring), apply the two principles informally in plain prose — motivated, connected, caveats kept out of the roots — with NO probe phase, NO quizzes, NO logging machinery.
 
 The goal is never "they can recite the fact." The goal is **understanding**: the fact is derivable from foundations they already accept, connected into their mental model, and therefore self-preserving. Memorized facts rot. Understood facts don't.
 
@@ -99,6 +101,12 @@ The tool already tells you to keep options even. That rule isn't enough on its o
 
 If, reading the finished set cold, you can still tell which is right without knowing the material, you skipped step 1 or 2 — regenerate, don't patch.
 
+**Pre-flight linter (run it on every quiz).** The mechanical tells are checkable by script, so let the script check them: justification words inside option labels, one option far longer/shorter than the rest, bolding that appears in some options but not others, a missing or empty explanation. Pass the drafted quiz arguments as JSON to:
+
+`python3 <teach skill dir>/scripts/lint_quiz.py '<quiz-args-json>'`
+
+where `<quiz-args-json>` is exactly the arguments you're about to send to `quiz` — `{"question": ..., "options": [{"label": ...}, ...], "correctAnswer": ..., "explanation": ...}`. Fix anything it flags before sending; if it reports clean, send as-is.
+
 ### Phase 1 — Probe (never skip this)
 
 You can't teach into his zone of proximal development without knowing where its edges are, and you can't aim the teaching without knowing what he's actually reaching for. Two separate unknowns, two separate tools — keep the boundary clean:
@@ -120,7 +128,7 @@ Do not advance to Phase 2 until, for each goal-relevant strand, you can state co
 
 This is the highest-leverage step; don't rush it. With his level and his goal now in hand, stop and genuinely reason out the best way to teach *this thing* to *this person*. Re-read the philosophy above and plan against it:
 
-- **Scope the field first with a researcher child** (spawn per the pattern above, using `subagents/researcher.md` from this skill's folder). Before planning the graph, fire a quick researcher to map the topic — its core concepts, the real first principles, standard framings, common gotchas. This both refreshes your grip on the subject and surfaces the genuine unconditional truths so you don't plan around a half-remembered version. Cheap, and it makes the whole plan more accurate.
+- **Scope the field with a researcher child — only when it earns its pause** (spawn per the pattern above, using `subagents/researcher.md` from this skill's folder). Fire one when the topic has checkable, volatile, or detail-heavy facts — versions, history, named results, dates, specs — or when your own grip on it feels half-remembered; it maps the topic's core concepts, real first principles, standard framings, and common gotchas so the plan isn't built on stale memory. For stable, closed subjects you know cold (basic calculus, standard linear algebra), skip it — a 30–60s pause per lesson buys nothing there. The same test governs mid-lesson verification spawns: unsure of any specific fact → verify; certain → teach.
 - What are the unconditional truths this rests on? Is there a clean atomic unit ("ALL X is done through {____}")?
 - Which of those does he already hold (from Phase 1a)? Build from there — not below it, not above it.
 - What's the motivated discovery path from those truths to his goal? Where does each step come from — why would anyone reach for it?
@@ -165,7 +173,7 @@ So whenever math notation is involved — explanations, questions, quiz options 
 - Inline math: `$f(x)$`
 - Centered display math: `$$` fenced on its own lines, e.g. `$$\n f(x) \n$$`
 
-If LaTeX can be used, it should be. Write $f(x) = x^2$, not `f(x) = x^2`. The Prime Agent terminal renders `$...$`/`$$...$$` inline as unicode; the raw LaTeX is preserved in the log.
+If LaTeX can be used, it should be. Write $f(x) = x^2$, not `f(x) = x^2`. Why: LaTeX is the one notation that renders everywhere the lesson is read — the Prime Agent terminal renders `$...$`/`$$...$$` inline as unicode, and Obsidian renders it natively in the md-log note — while plain-text approximations render correctly nowhere. (The raw LaTeX is preserved in the log.)
 
 ## Prime Agent mechanics at a glance
 
@@ -173,19 +181,20 @@ This is the Prime Agent port of the `learn` system. The teaching philosophy abov
 
 - **`quiz` and `ask_user_question` are real tools** — provided by the ported extensions (`quiz.ts`, `ask-user-question.ts` under `~/.prime/agent/extensions/`). They behave exactly as described above (grader + "I don't know" + optional note; options/text/multi-select; instant ✓/✗ feedback). They never silently fail: in daemon-hosted sessions (Prime Agent's default), where pop-up widgets can't be drawn, they automatically step down — first to native pickers/editors, then to a `plain_chat` result that tells you to ask the question in your next message and grade the reply yourself. Same pedagogy, same options, no manual fallback needed. If you ever see a `plain_chat` result, just ask in chat and grade the reply against the details.
 - **Child agents (researcher, mermaid-maker, svg-maker) are spawned with `await rlm(...)`** and reply later via `agent_message` — see ["Prime Agent: how to run the researcher"](#prime-agent-how-to-run-the-researcher-and-other-child-agents) above, and the `visualize` skill for the makers.
+- **Teaching sessions run long — watch the context.** If context is filling up and nodes remain, use the `compact` skill to summarize and continue, instead of letting the late nodes degrade. A half-finished map that stays sharp beats a finished one taught on fumes.
 - **The `md-log` extension is ported, with per-lesson hot-linking.** It watches `~/.prime/agent/md-log-config.json` (`{"file": "<path>"}`; Windows paths accepted) and links the session to that note the moment the file changes mid-session — that is how teaching sessions reach the vault with zero user action. There is no permanent default note: the config is written per lesson (see the next section), and a stale config is ignored until it changes. `/md-log <file>` links a different note manually; `/md-unlog` disables it for that session. The note is Obsidian-flavored callouts with LaTeX, mermaid, and images intact — the primary "fully rendered" reading surface for lessons, exactly like the original pi setup. In WSL, either give the `/mnt/c/...` path or paste the Windows `C:\...` path from Explorer (it is translated automatically). Writes work anywhere under your Windows user profile; the `C:\` root itself is not writable from WSL. **Logging to Obsidian is mandatory for teaching sessions — see the next section.**
 
-## Automatic Obsidian logging (mandatory — never skip, never ask)
+## Automatic Obsidian logging (mandatory within a teaching session)
 
 The `md-log` extension mirrors the ENTIRE session (user prompts, your prose, every quiz/ask block with answers and feedback) into a linked note, live: a quiz question appears in the note the moment the learner sees it on screen, and the answer + feedback are appended right after. It needs zero user action — no `/md-log`, no restart — as long as the session's worker started after the md-log extension update (any new session qualifies).
 
 The link is per-lesson and dynamic. There is NO permanent static config. At the start of every teaching session, before Phase 1:
 
-1. **Resolve the vault.** Use the vault the learner names. Default: `C:\Users\Amogh\Desktop\Teaching` (WSL: `/mnt/c/Users/Amogh/Desktop/Teaching`).
+1. **Resolve the vault.** Use the vault the learner names. If none is named, reuse the vault of the most recent logged lesson — read the note path currently in `~/.prime/agent/md-log-config.json` and take the folder that contains its `learn/` directory. If there is no config, ask the learner where to log. Never invent or assume a vault path.
 2. **Create the lesson note.** Always inside a `learn` folder: `vault/learn/<topic>.md` (e.g. `learn/python-lists.md`). Run `mkdir -p` on the folder if needed, then write an initial title line (`# Python Lists`) to the note. Reuse the note when the learner continues the same topic in a new session.
-3. **Point the config at it.** Write `~/.prime/agent/md-log-config.json` as plain JSON: `{"file": "C:\\Users\\Amogh\\Desktop\\Teaching\\learn\\python-lists.md"}`. The Windows path form is fine; the extension translates it for WSL. Write the config exactly once per lesson — the extension detects the mid-session change (config fingerprint), links instantly, backfills everything said so far, and mirrors live from then on. A stale config from a previous lesson is ignored by other sessions, so no cleanup is required (deleting the file at lesson end is optional and tidy).
-4. **Verify it is live.** After the first exchange, read the note file and confirm the latest assistant message / quiz question is in it.
+3. **Point the config at it.** Write `~/.prime/agent/md-log-config.json` as plain JSON: `{"file": "<absolute path of the lesson note>"}` — e.g. `{"file": "C:\\Users\\<user>\\Desktop\\MyVault\\learn\\python-lists.md"}`. A Windows path form is fine; the extension translates it for WSL. Write the config exactly once per lesson — the extension detects the mid-session change (config fingerprint), links instantly, backfills everything said so far, and mirrors live from then on. A stale config from a previous lesson is ignored by other sessions, so no cleanup is required (deleting the file at lesson end is optional and tidy).
+4. **Verify it is live — once per session, not per lesson.** After the first exchange of this session, read the note file and confirm the latest assistant message / quiz question is in it. Once a session has verified live (or has been switched to the fallback below), trust the link for the rest of it — don't re-verify every lesson.
    - If it is NOT live, the session's worker predates the md-log update — run the fallback synchronizer, which regenerates the note from the session log in exactly the extension's format and is idempotent (safe to re-run, e.g. at the end of each turn):
      `python3 <teach skill dir>/scripts/mdlog_replay.py ~/.prime/agent/sessions/<session-id>.jsonl <note path> [--title "..."]`
    - Tell the learner once that one Prime Agent restart enables fully automatic live logging; after that, this fallback is never needed again.
-5. **Never break the chain.** If the note can't be written (path, permissions, vault location), say so plainly and fix it before teaching. An unlogged lesson is a failed lesson.
+5. **Don't silently lose the log.** If the note can't be written (path, permissions, vault location), say so plainly, then fix it or fall back to the synchronizer script — before teaching continues. A lesson the learner knows isn't logged is a recoverable gap; a lesson that silently isn't logged is a failure.
